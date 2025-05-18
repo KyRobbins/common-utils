@@ -1,16 +1,33 @@
 package com.github.kyrobbins.common.utility.config;
 
 import com.github.kyrobbins.common.exception.ConfigurationException;
+import com.github.kyrobbins.common.exception.ParserException;
+import com.github.kyrobbins.common.interfaces.AgeAwareCache;
+import com.github.kyrobbins.common.utility.cache.MaxAgeCache;
 import jakarta.annotation.Nonnull;
 import jakarta.annotation.Nullable;
-import lombok.*;
+import lombok.AccessLevel;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+import lombok.ToString;
 import lombok.extern.slf4j.Slf4j;
+import lombok.var;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
-import java.util.*;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Properties;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.Supplier;
@@ -18,10 +35,11 @@ import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 /**
- * API used for handling multiple sources of configuration data, enabling retrieval through a single point of entry API.
+ * API used for handling multiple sources of configuration data, enabling retrieval through a single point of entry
+ * API.
  *
- * <p>{@link ConfigLoader} is based off a hierarchical approach, where configuration sources are added by their priority,
- * in reverse, where the last source added has the highest priority (checked first)</p>
+ * <p>{@link ConfigLoader} is based off a hierarchical approach, where configuration sources are added by their
+ * priority, in reverse, where the last source added has the highest priority (checked first)</p>
  */
 @RequiredArgsConstructor
 @Slf4j
@@ -34,8 +52,30 @@ public class ConfigLoader {
 
     /** The list of {@link Source}s to check through for key values */
     private final List<Source> sources;
+    /** The cache used for faster lookups when desired */
+    private final AgeAwareCache<String, String> lookupMaxAgeCache;
+    /** Denotes if a Cache is used for the data lookups */
+    private final boolean cacheEnabled;
 
     private final PropertyParser propertyParser = new PropertyParser();
+
+    public ConfigLoader(@Nonnull List<Source> sources) {
+        this(sources, false);
+    }
+
+    public ConfigLoader(@Nonnull List<Source> sources, boolean enableCache) {
+        this(sources, enableCache, Clock.systemDefaultZone());
+    }
+
+    public ConfigLoader(@Nonnull List<Source> sources, @Nonnull Clock clock) {
+        this(sources, false, clock);
+    }
+
+    public ConfigLoader(@Nonnull List<Source> sources, boolean enableCache, @Nonnull Clock clock) {
+        this.sources = sources;
+        this.cacheEnabled = enableCache;
+        this.lookupMaxAgeCache = enableCache ? new MaxAgeCache<>(clock) : new EmptyAgeAwareCache<>();
+    }
 
     /**
      * Creates a {@link ConfigLoader.Builder} for defining sources, prioritized by reverse definition order, for
@@ -53,15 +93,16 @@ public class ConfigLoader {
      *
      * @return The created {@link ConfigLoader.Builder}
      */
+    @Nonnull
     public static Builder builder() {
         return new Builder();
     }
 
     /**
      * Creates a {@link DeferredSource}, indicating the source depends on other configuration sources to be loaded
-     * first, before this one can.  Note that a {@link DeferredSource} defines a "Source Factory" (Not a {@link Source}),
-     * which takes a ConfigLoader instance to build the source.  It's also only currently supporting a single pass for
-     * loading {@link DeferredSource}s, so nesting is not supported.  Example:
+     * first, before this one can.  Note that a {@link DeferredSource} defines a "Source Factory" (Not a
+     * {@link Source}), which takes a ConfigLoader instance to build the source.  It's also only currently supporting a
+     * single pass for loading {@link DeferredSource}s, so nesting is not supported.  Example:
      *
      * <pre>{@code
      * // ...
@@ -71,10 +112,11 @@ public class ConfigLoader {
      * }</pre>
      *
      * @param sourceFactory A factory function for creating the source
-     * @param label A readable name for this source.
+     * @param label         A readable name for this source.
      * @return The wrapped {@link DeferredSource}
      */
-    public static DeferredSource defer(Function<ConfigLoader, UnaryOperator<String>> sourceFactory, String label) {
+    @Nonnull
+    public static DeferredSource defer(@Nonnull Function<ConfigLoader, UnaryOperator<String>> sourceFactory, @Nonnull String label) {
         return defer(cl -> {
             UnaryOperator<String> source = sourceFactory.apply(cl);
 
@@ -89,7 +131,8 @@ public class ConfigLoader {
      * @param sourceFactory A factory function for creating the source
      * @return The wrapped {@link DeferredSource}.
      */
-    public static DeferredSource defer(Function<ConfigLoader, Source> sourceFactory) {
+    @Nonnull
+    public static DeferredSource defer(@Nonnull Function<ConfigLoader, Source> sourceFactory) {
         return new DeferredSource(sourceFactory);
     }
 
@@ -97,30 +140,77 @@ public class ConfigLoader {
      * Searches through the defined sources, in reverse order (the highest priority first) for the value associated with
      * a provided key.  Supports override values when key is enclosed in {brackets}.
      *
-     * <p>Override Example: The following code will attempt to fetch the value for `feature.ops.activated`, and if it is
-     * not able to find it, it will then attempt to find a value for `feature.activated`.</p>
+     * <p>Override Example: The following code will attempt to fetch the value for `feature.ops.activated`, and if it
+     * is not able to find it, it will then attempt to find a value for `feature.activated`.</p>
      *
      * <pre>{@code
      * configLoader.getString("feature.{ops}.activated");
      * }</pre>
      *
-     * <p>This allows the keys to have specific context overrides for the same key, where a default value can be denoted
-     * by configuring a property that resembles the override without the override part.</p>
+     * <p>This allows the keys to have specific context overrides for the same key, where a default value can be
+     * denoted by configuring a property that resembles the override without the override part.</p>
      *
      * @param key The key associated with the desired value to search for
      * @return A {@link Value} potentially containing the value.
      */
+    @Nonnull
     public Value<String> getString(@Nonnull String key) {
+        return getString(key, 0L);
+    }
+
+    /**
+     * Searches through the defined sources, in reverse order (the highest priority first) for the value associated with
+     * a provided key.
+     *
+     * @param key    The key associated with the desired value to search for
+     * @param maxAge The age a cached value can be before it must be looked up fresh
+     * @return A {@link Value} potentially containing the value.
+     */
+    @Nonnull
+    public Value<String> getString(@Nonnull String key, @Nonnull Duration maxAge) {
+        return getString(key, maxAge.toMillis());
+    }
+
+    /**
+     * Searches through the defined sources, in reverse order (the highest priority first) for the value associated with
+     * a provided key.
+     *
+     * @param key      The key associated with the desired value to search for
+     * @param maxAgeMs The age a cached value can be (in milliseconds) before it must be looked up fresh
+     * @return A {@link Value} potentially containing the value.
+     */
+    @Nonnull
+    private Value<String> getString(@Nonnull String key, long maxAgeMs) {
+        String value;
+
+        if (cacheEnabled) {
+            value = lookupMaxAgeCache.get(key, maxAgeMs, this::getString0).orElse(null);
+        } else {
+            value = getString0(key);
+        }
+
+        return Value.ofNullable(key, value);
+    }
+
+    /**
+     * Searches through the defined sources, in reverse order (the highest priority first) for the value associated with
+     * a provided key.
+     *
+     * @param key The key associated with the desired value to search for
+     * @return The associated value, or null if no value was found
+     */
+    @Nullable
+    private String getString0(@Nonnull String key) {
         Set<String> expandedKeys = new HashSet<>();
         expandedKeys.add(key);
-        return Value.ofNullable(key, getExpandedNormalizedKey(key, expandedKeys));
+        return getExpandedNormalizedKey(key, expandedKeys);
     }
 
     /**
      * Expands the provided key and returns the value associated with it, if any exist.
      *
      * @param expandableKey The key associated with the desired value to search for
-     * @param expandedKeys The {@link Set} of previously expanded keys
+     * @param expandedKeys  The {@link Set} of previously expanded keys
      * @return The {@link String} value associated with the given key, or null if it was not found
      */
     @Nullable
@@ -133,7 +223,7 @@ public class ConfigLoader {
      * Expands the given key by iteratively resolving any placeholders that may exist within it
      *
      * @param expandableKey The key that potentially contains expandable placeholders
-     * @param expandedKeys The {@link Set} of previously expanded keys
+     * @param expandedKeys  The {@link Set} of previously expanded keys
      * @return The fully expanded key that can now be attempted to be resolved to an associated value
      */
     @Nonnull
@@ -171,7 +261,7 @@ public class ConfigLoader {
      * Searches for a value associated with the given key, trying both of it's normalized formats (if it can be
      * interpreted in more than one way).
      *
-     * @param key The key associated with the desired value eto search for
+     * @param key          The key associated with the desired value eto search for
      * @param expandedKeys The {@link Set} of previously expanded keys
      * @return The {@link String} value associated with the given key, or null if it was not found
      * @see #normalizeKey(String, boolean)
@@ -200,11 +290,11 @@ public class ConfigLoader {
      * Searches through the defined sources, in reverse order (the highest priority first) for the value associated with
      * a provided key.
      *
-     * @param key The key associated with the desired value to search for
+     * @param key          The key associated with the desired value to search for
      * @param expandedKeys The {@link Set} of previously expanded keys
      * @return The {@link String} value associated with the given key, or null if it was not found
      * @throws ConfigurationException Thrown if the key is present in the expanded key list, signaling an expansion
-     * loop.
+     *                                loop.
      */
     @Nullable
     private String getStringForAbsoluteKey(@Nonnull String key, @Nonnull Set<String> expandedKeys) {
@@ -233,8 +323,8 @@ public class ConfigLoader {
 
     /**
      * If present, removes the override value decorators from a key, then returns the new key.  Key overrides are
-     * denoted by a set of curly brackets ("{" and "}").  The second argument will control whether these specific
-     * values are included in the new key or removed, to create a generic version of the key.
+     * denoted by a set of curly brackets ("{" and "}").  The second argument will control whether these specific values
+     * are included in the new key or removed, to create a generic version of the key.
      *
      * <p>`enable.feature.{username}` would return as `enable.feature.username` (if specific), or `enable.feature`
      * (if generic)</p>
@@ -245,7 +335,7 @@ public class ConfigLoader {
      * <p>Note that multiple specific keys (i.e. {@code my.{specific}.{device}.key}) are undefined behavior currently
      * and are unsupported</p>
      *
-     * @param key The property key to transform
+     * @param key            The property key to transform
      * @param keepProperties Whether to keep the specific key components
      * @return The transformed property key
      */
@@ -305,6 +395,7 @@ public class ConfigLoader {
     /** Helper class for defining a region within a string that has a placeholder value */
     @Data
     private static class KeyRegion {
+
         /** The start of the region (including placeholder syntax characters) */
         private final int start;
         /** The end of the region (including placeholder syntax characters) */
@@ -317,25 +408,35 @@ public class ConfigLoader {
 
     /**
      * Searches through the defined sources, in reverse order (the highest priority first) for the value associated with
-     * a provided key, parsed as a boolean.
+     * a provided key, parsed as a boolean.  Does NOT use cached values
      *
      * @param key The key associated with the desired value to search for
      * @return A {@link Value} potentially containing the desired value
      */
-    public Value<Boolean> getBoolean(String key) {
-        Value<String> loadedValue = getString(key);
+    @Nonnull
+    public Value<Boolean> getBoolean(@Nonnull String key) {
+        return getBoolean(key, Duration.ZERO);
+    }
 
-        if (loadedValue.isPresent()) {
-            if ("true".equalsIgnoreCase(loadedValue.orElseThrow())) {
-                return Value.ofNullable(key, Boolean.TRUE);
-            } else if ("false".equalsIgnoreCase(loadedValue.orElseThrow())) {
-                return Value.ofNullable(key, Boolean.FALSE);
+    /**
+     * Searches through the defined sources, in reverse order (the highest priority first) for the value associated with
+     * a provided key, parsed as a boolean.
+     *
+     * @param key    The key associated with the desired value to search for
+     * @param maxAge The age a cached value can be before it must be looked up fresh
+     * @return A {@link Value} potentially containing the desired value
+     */
+    @Nonnull
+    public Value<Boolean> getBoolean(@Nonnull String key, @Nonnull Duration maxAge) {
+        return parsedOption(key, maxAge.toMillis(), Boolean.class, stringValue -> {
+            if ("true".equalsIgnoreCase(stringValue)) {
+                return Boolean.TRUE;
+            } else if ("false".equalsIgnoreCase(stringValue)) {
+                return Boolean.FALSE;
             } else {
-                throw new ConfigurationException("Value found for getBoolean() was not 'true' or 'false', unable to parse.");
+                throw new ParserException("Cannot convert value to boolean");
             }
-        } else {
-            return Value.empty(key);
-        }
+        });
     }
 
     /**
@@ -345,8 +446,22 @@ public class ConfigLoader {
      * @param key The key associated with the desired value to search for
      * @return A {@link Value} potentially containing the desired value
      */
-    public Value<Integer> getInteger(String key) {
-        return parsedOption(key, Integer.class, Integer::parseInt);
+    @Nonnull
+    public Value<Integer> getInteger(@Nonnull String key) {
+        return getInteger(key, Duration.ZERO);
+    }
+
+    /**
+     * Searches through the defined sources, in reverse order (the highest priority first) for the value associated with
+     * a provided key, parsed as an {@link Integer}
+     *
+     * @param key    The key associated with the desired value to search for
+     * @param maxAge The max age a cached value can be to still use it
+     * @return A {@link Value} potentially containing the desired value
+     */
+    @Nonnull
+    public Value<Integer> getInteger(@Nonnull String key, @Nonnull Duration maxAge) {
+        return parsedOption(key, maxAge.toMillis(), Integer.class, Integer::parseInt);
     }
 
     /**
@@ -356,8 +471,22 @@ public class ConfigLoader {
      * @param key The key associated with the desired value to search for
      * @return A {@link Value} potentially containing the desired value
      */
-    public Value<Long> getLong(String key) {
-        return parsedOption(key, Long.class, Long::parseLong);
+    @Nonnull
+    public Value<Long> getLong(@Nonnull String key) {
+        return getLong(key, Duration.ZERO);
+    }
+
+    /**
+     * Searches through the defined sources, in reverse order (the highest priority first) for the value associated with
+     * a provided key, parsed as a {@link Long}
+     *
+     * @param key    The key associated with the desired value to search for
+     * @param maxAge The max age a cached value can be to still use it
+     * @return A {@link Value} potentially containing the desired value
+     */
+    @Nonnull
+    public Value<Long> getLong(@Nonnull String key, @Nonnull Duration maxAge) {
+        return parsedOption(key, maxAge.toMillis(), Long.class, Long::parseLong);
     }
 
     /**
@@ -367,8 +496,22 @@ public class ConfigLoader {
      * @param key The key associated with the desired value to search for
      * @return A {@link Value} potentially containing the desired value
      */
-    public Value<Float> getFloat(String key) {
-        return parsedOption(key, Float.class, Float::parseFloat);
+    @Nonnull
+    public Value<Float> getFloat(@Nonnull String key) {
+        return getFloat(key, Duration.ZERO);
+    }
+
+    /**
+     * Searches through the defined sources, in reverse order (the highest priority first) for the value associated with
+     * a provided key, parsed as a {@link Float}
+     *
+     * @param key    The key associated with the desired value to search for
+     * @param maxAge The max age a cached value can be to still use it
+     * @return A {@link Value} potentially containing the desired value
+     */
+    @Nonnull
+    public Value<Float> getFloat(@Nonnull String key, @Nonnull Duration maxAge) {
+        return parsedOption(key, maxAge.toMillis(), Float.class, Float::parseFloat);
     }
 
     /**
@@ -378,21 +521,37 @@ public class ConfigLoader {
      * @param key The key associated with the desired value to search for
      * @return A {@link Value} potentially containing the desired value
      */
-    public Value<Double> getDouble(String key) {
-        return parsedOption(key, Double.class, Double::parseDouble);
+    @Nonnull
+    public Value<Double> getDouble(@Nonnull String key) {
+        return getDouble(key, Duration.ZERO);
+    }
+
+    /**
+     * Searches through the defined sources, in reverse order (the highest priority first) for the value associated with
+     * a provided key, parsed as a {@link Double}
+     *
+     * @param key    The key associated with the desired value to search for
+     * @param maxAge The max age a cached value can be to still use it
+     * @return A {@link Value} potentially containing the desired value
+     */
+    @Nonnull
+    public Value<Double> getDouble(@Nonnull String key, @Nonnull Duration maxAge) {
+        return parsedOption(key, maxAge.toMillis(), Double.class, Double::parseDouble);
     }
 
     /**
      * Returns a {@link Value} containing the parsed value using the given parser
      *
-     * @param key The key associated with the desired value to search for
-     * @param clazz The desired class type of the parsed value
-     * @param parser The parser to use to parse the value to the desired type
+     * @param key      The key associated with the desired value to search for
+     * @param maxAgeMs The maximum age a cached value can be to still use it
+     * @param clazz    The desired class type of the parsed value
+     * @param parser   The parser to use to parse the value to the desired type
+     * @param <T>      The desired class type of the parsed value
      * @return A {@link Value} containing the parsed value, or a {@link Value#empty(String)} if the value was not found
-     * @param <T> The desired class type of the parsed value
      */
-    private <T> Value<T> parsedOption(String key, Class<T> clazz, Function<String, T> parser) {
-        Value<String> stringValue = getString(key);
+    @Nonnull
+    private <T> Value<T> parsedOption(@Nonnull String key, long maxAgeMs, @Nonnull Class<T> clazz, @Nonnull Function<String, T> parser) {
+        Value<String> stringValue = getString(key, maxAgeMs);
 
         if (stringValue.isPresent()) {
             return new Value<>(stringValue.propertyName, parseString(key, stringValue.value, clazz, parser));
@@ -404,14 +563,15 @@ public class ConfigLoader {
     /**
      * Parses the given {@link String} value into the required type using the given parser
      *
-     * @param key The key associated with the desired value to search for
-     * @param value The value eto be parsed
-     * @param clazz The desired class type of the parsed value
+     * @param key    The key associated with the desired value to search for
+     * @param value  The value eto be parsed
+     * @param clazz  The desired class type of the parsed value
      * @param parser The parser to use to parse the value to the desired type
+     * @param <T>    The desired class type of the parsed value
      * @return The parsed value
-     * @param <T> The desired class type of the parsed value
      */
-    private <T> T parseString(String key, String value, Class<T> clazz, Function<String, T> parser) {
+    @Nonnull
+    private <T> T parseString(@Nonnull String key, @Nonnull String value, @Nonnull Class<T> clazz, @Nonnull Function<String, T> parser) {
         try {
             return parser.apply(value);
         } catch (RuntimeException e) {
@@ -422,18 +582,19 @@ public class ConfigLoader {
     /**
      * Helper method for creating a parsing error message
      *
-     * @param key The key associated with the value that couldn't be parsed
+     * @param key   The key associated with the value that couldn't be parsed
      * @param clazz The type the value was being parsed to
      * @return An error message denoting the issue that occurred
      */
-    private String parseFailedMessage(String key, Class<?> clazz) {
+    @Nonnull
+    private String parseFailedMessage(@Nonnull String key, @Nonnull Class<?> clazz) {
         return String.format("Could not parse '%s' value as type '%s'", key, clazz.getCanonicalName());
     }
 
     /**
      * Helper to return a default value if the provided value is null
      *
-     * @param value The value to check for null
+     * @param value        The value to check for null
      * @param defaultValue The default value to use
      * @return THe originally given value if it is not null, or the default value if it is
      */
@@ -447,10 +608,23 @@ public class ConfigLoader {
 
         /** The list of sources to use to build the {@link ConfigLoader} class */
         private final List<InitializableSource> sources;
+        private boolean useCache;
 
         private Builder() {
             sources = new ArrayList<>();
             addSource(new InitializableSource(new RootSource()));
+        }
+
+        /**
+         * Enables the use of a {@link com.github.kyrobbins.common.interfaces.Cache} for {@link ConfigLoader} instance
+         * that is built by this builder object.
+         *
+         * @return This {@link Builder} instance
+         */
+        @Nonnull
+        public Builder enableCache() {
+            this.useCache = true;
+            return this;
         }
 
         /**
@@ -462,15 +636,32 @@ public class ConfigLoader {
          *
          * @return The constructed {@link ConfigLoader}
          */
+        @Nonnull
         public ConfigLoader build() {
+            return build(Clock.systemDefaultZone());
+        }
+
+        /**
+         * Builds a {@link ConfigLoader} instance with the configured {@link Source}s
+         *
+         * <p>This method will first build a {@link ConfigLoader} with the sources already initialized, then initialize
+         * {@link DeferredSource}s using those configurations before building a new {@link ConfigLoader} with all the
+         * now initialized sources</p>
+         *
+         * @return The constructed {@link ConfigLoader}
+         */
+        @Nonnull
+        public ConfigLoader build(@Nonnull Clock clock) {
             // Note: This logic is only set up to expect one level of expansion for deferred sources.  More work is
             // needed if infinite expansion is needed (i.e., if one source depends on another source, which then also
             // depends on another source itself...)
             // Build a ConfigLoader using already initialized sources
-            ConfigLoader configLoader = new ConfigLoader(sources.stream()
+            List<Source> newSourceList = sources.stream()
                     .filter(InitializableSource::isInitialized)
                     .map(InitializableSource::getSource)
-                    .collect(Collectors.toList()));
+                    .collect(Collectors.toList());
+
+            ConfigLoader configLoader = new ConfigLoader(newSourceList, useCache, clock);
 
             Set<String> sourceLabels = new HashSet<>();
 
@@ -496,7 +687,7 @@ public class ConfigLoader {
 
             log.info("Building ConfigLoader with the following sources (in descending order of priority): [{}]", buildSourceList(initializedSources));
 
-            return new ConfigLoader(initializedSources);
+            return new ConfigLoader(initializedSources, useCache, clock);
         }
 
         /**
@@ -505,7 +696,8 @@ public class ConfigLoader {
          * @param sources The sources being used to build the list
          * @return The {@link String} representation of the comma-delimited source list
          */
-        private String buildSourceList(List<Source> sources) {
+        @Nonnull
+        private String buildSourceList(@Nonnull List<Source> sources) {
             return sources.stream()
                     .map(Source::getLabel)
                     .filter(Objects::nonNull)
@@ -519,6 +711,7 @@ public class ConfigLoader {
          * @return This {@link Builder} instance
          * @throws ConfigurationException If the sources already contained a source with the same label
          */
+        @Nonnull
         public Builder addSource(@Nonnull final Source source) {
             return addSource(new InitializableSource(source));
         }
@@ -526,11 +719,12 @@ public class ConfigLoader {
         /**
          * Adds a generic source for searching for key values
          *
-         * @param source The source to search for key values
+         * @param source      The source to search for key values
          * @param sourceLabel A readable name for this source
          * @return This {@link Builder} instance
          * @throws ConfigurationException If the sources already contained a source with the same label
          */
+        @Nonnull
         public Builder addSource(@Nonnull final UnaryOperator<String> source, @Nonnull final String sourceLabel) {
             return addSource(new InitializableSource(new SimpleSource(source, sourceLabel)));
         }
@@ -538,11 +732,12 @@ public class ConfigLoader {
         /**
          * Adds a {@link Properties} source for searching for key values
          *
-         * @param properties The source to search for key values
+         * @param properties  The source to search for key values
          * @param sourceLabel A readable name for this source
          * @return This {@link Builder} instance
          * @throws ConfigurationException If the sources already contained a source with the same label
          */
+        @Nonnull
         public Builder addSource(@Nonnull Properties properties, @Nonnull String sourceLabel) {
             return addSource(properties::getProperty, sourceLabel);
         }
@@ -550,11 +745,12 @@ public class ConfigLoader {
         /**
          * Adds a {@link Map} source for searching for key values
          *
-         * @param map The source to search for key values
+         * @param map         The source to search for key values
          * @param sourceLabel A readable name for this source
          * @return This {@link Builder} instance
          * @throws ConfigurationException If the sources already contained a source with the same label
          */
+        @Nonnull
         public Builder addSource(@Nonnull Map<String, String> map, @Nonnull String sourceLabel) {
             return addSource(map::get, sourceLabel);
         }
@@ -567,6 +763,7 @@ public class ConfigLoader {
          * @throws ConfigurationException If the sources already contained a source with the same label
          * @see DeferredSource
          */
+        @Nonnull
         public Builder addSource(@Nonnull DeferredSource source) {
             return addSource(new InitializableSource(source.sourceFactory));
         }
@@ -578,6 +775,7 @@ public class ConfigLoader {
          * @return This {@link Builder} instance
          * @throws ConfigurationException If the sources already contained a source with the same label
          */
+        @Nonnull
         private Builder addSource(@Nonnull InitializableSource initializableSource) {
             this.sources.add(initializableSource);
             return this;
@@ -591,6 +789,7 @@ public class ConfigLoader {
          * @throws ConfigurationException If the sources already contained a source with the same label
          * @see PropertiesFile
          */
+        @Nonnull
         public Builder addSource(@Nonnull PropertiesFile propertiesFile) {
             try {
                 Properties properties = new Properties();
@@ -629,11 +828,11 @@ public class ConfigLoader {
         /** Denotes if the resource is required to exist */
         private final boolean required;
 
-        public PropertiesFile(String filePath, boolean resourceFile) {
+        public PropertiesFile(@Nonnull String filePath, boolean resourceFile) {
             this(filePath, resourceFile, true);
         }
 
-        public PropertiesFile(String filePath, boolean resourceFile, boolean required) {
+        public PropertiesFile(@Nonnull String filePath, boolean resourceFile, boolean required) {
             this.filePath = filePath;
             this.resourceFile = resourceFile;
             this.required = required;
@@ -647,6 +846,8 @@ public class ConfigLoader {
      */
     @RequiredArgsConstructor
     public static class DeferredSource {
+
+        @Nonnull
         private final Function<ConfigLoader, Source> sourceFactory;
     }
 
@@ -655,7 +856,7 @@ public class ConfigLoader {
 
         private final UnaryOperator<String> source;
 
-        private SimpleSource(UnaryOperator<String> source, String label) {
+        private SimpleSource(@Nonnull UnaryOperator<String> source, @Nonnull String label) {
             super(label);
             this.source = source;
         }
@@ -689,6 +890,7 @@ public class ConfigLoader {
             this.sourceFactory = sourceFactory;
         }
 
+        @Nonnull
         public InitializableSource initialize(@Nonnull ConfigLoader configLoader) {
             if (sourceFactory != null) {
                 return new InitializableSource(sourceFactory.apply(configLoader));
@@ -766,7 +968,6 @@ public class ConfigLoader {
             return value;
         }
 
-        @Nonnull
         public T orElse(T fallback) {
             return isPresent() ? value : fallback;
         }

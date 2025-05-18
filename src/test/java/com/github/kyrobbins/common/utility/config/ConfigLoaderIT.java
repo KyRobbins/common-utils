@@ -1,19 +1,27 @@
 package com.github.kyrobbins.common.utility.config;
 
 import com.github.kyrobbins.common.exception.ConfigurationException;
+import com.github.kyrobbins.common.interfaces.TriFunction;
 import jakarta.annotation.Nonnull;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.function.BiFunction;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ConfigLoaderIT {
 
@@ -35,7 +43,7 @@ class ConfigLoaderIT {
 
         assertThatThrownBy(() -> configLoader.getBoolean("test_key_string"))
                 .isInstanceOf(ConfigurationException.class)
-                .hasMessage("Value found for getBoolean() was not 'true' or 'false', unable to parse.");
+                .hasMessage("Could not parse 'test_key_string' value as type 'java.lang.Boolean'");
     }
 
     @Test
@@ -156,6 +164,85 @@ class ConfigLoaderIT {
         assertEquals(new ConfigLoader.Value<>(key, expectedResult), actualResult);
     }
 
+    public static Stream<Arguments> cachedLookup_returnsCachedValue() {
+        List<String> stringsToSet = listOf("value1", "value2", "value3", "value4", "value5");
+        List<String> expectedStrings = listOf("value1", "value2", "value2", "value2", "value4", "value5");
+
+        List<String> boolsToSet = listOf("true", "false", "true", "true", "false");
+        List<Boolean> expectedBools = listOf(true, false, false, false, true, false);
+
+        List<String> intsToSet = listOf("1", "2", "3", "4", "5");
+        List<Integer> expectedInts = listOf(1, 2, 2, 2, 4, 5);
+        List<Long> expectedLongs = listOf(1L, 2L, 2L, 2L, 4L, 5L);
+
+        List<String> floatsToSet = listOf("1.5", "2.5", "3.5", "4.5", "5.5");
+        List<Float> expectedFloats = listOf(1.5F, 2.5F, 2.5F, 2.5F, 4.5F, 5.5F);
+        List<Double> expectedDoubles = listOf(1.5, 2.5, 2.5, 2.5, 4.5, 5.5);
+
+        BiFunction<ConfigLoader, String, ConfigLoader.Value<?>> stringBiFunction = ConfigLoader::getString;
+        TriFunction<ConfigLoader, String, Duration, ConfigLoader.Value<?>> stringTriFunction = ConfigLoader::getString;
+
+        BiFunction<ConfigLoader, String, ConfigLoader.Value<?>> boolBiFunction = ConfigLoader::getBoolean;
+        TriFunction<ConfigLoader, String, Duration, ConfigLoader.Value<?>> boolTriFunction = ConfigLoader::getBoolean;
+
+        BiFunction<ConfigLoader, String, ConfigLoader.Value<?>> intBiFunction = ConfigLoader::getInteger;
+        TriFunction<ConfigLoader, String, Duration, ConfigLoader.Value<?>> intTriFunction = ConfigLoader::getInteger;
+
+        BiFunction<ConfigLoader, String, ConfigLoader.Value<?>> longBiFunction = ConfigLoader::getLong;
+        TriFunction<ConfigLoader, String, Duration, ConfigLoader.Value<?>> longTriFunction = ConfigLoader::getLong;
+
+        BiFunction<ConfigLoader, String, ConfigLoader.Value<?>> floatBiFunction = ConfigLoader::getFloat;
+        TriFunction<ConfigLoader, String, Duration, ConfigLoader.Value<?>> floatTriFunction = ConfigLoader::getFloat;
+
+        BiFunction<ConfigLoader, String, ConfigLoader.Value<?>> doubleBiFunction = ConfigLoader::getDouble;
+        TriFunction<ConfigLoader, String, Duration, ConfigLoader.Value<?>> doubleTriFunction = ConfigLoader::getDouble;
+
+        return Stream.of(
+                Arguments.of(stringBiFunction, stringTriFunction, stringsToSet, expectedStrings),
+                Arguments.of(boolBiFunction, boolTriFunction, boolsToSet, expectedBools),
+                Arguments.of(intBiFunction, intTriFunction, intsToSet, expectedInts),
+                Arguments.of(longBiFunction, longTriFunction, intsToSet, expectedLongs),
+                Arguments.of(floatBiFunction, floatTriFunction, floatsToSet, expectedFloats),
+                Arguments.of(doubleBiFunction, doubleTriFunction, floatsToSet, expectedDoubles));
+    }
+
+    @ParameterizedTest
+    @MethodSource
+    void cachedLookup_returnsCachedValue(
+            BiFunction<ConfigLoader, String, ConfigLoader.Value<?>> loaderGetter,
+            TriFunction<ConfigLoader, String, Duration, ConfigLoader.Value<?>> loaderGetterWithDuration,
+            List<String> valuesToSet,
+            List<Object> expectedValues) {
+        // Using a mock clock for this test because we need to control he time for efficient testing
+        Clock mockClock = mock(Clock.class);
+
+        when(mockClock.millis())
+                .thenReturn(5_000L)
+                .thenReturn(5_000L)
+                .thenReturn(5_000L)
+                .thenReturn(8_000L)
+                .thenReturn(10_000L);
+
+        Map<String, String> testSource = new HashMap<>();
+
+        ConfigLoader loader = ConfigLoader.builder().addSource(testSource, "Test source").enableCache().build(mockClock);
+
+        // No second parameter means fresh lookup (no cache)
+        testSource.put("key1", valuesToSet.get(0));
+        assertEquals(expectedValues.get(0), loaderGetter.apply(loader, "key1").orElseThrow());
+        testSource.put("key1", valuesToSet.get(1));
+        assertEquals(expectedValues.get(1), loaderGetter.apply(loader, "key1").orElseThrow());
+        // The second parameter means fresh lookup if cached value is equal to or older than given
+        testSource.put("key1", valuesToSet.get(2));
+        assertEquals(expectedValues.get(2), loaderGetterWithDuration.apply(loader, "key1", Duration.ofSeconds(5)).orElseThrow());
+        testSource.put("key1", valuesToSet.get(3));
+        assertEquals(expectedValues.get(3), loaderGetterWithDuration.apply(loader, "key1", Duration.ofSeconds(4)).orElseThrow());
+        // Only when the second parameter is shorter than the cached age does it look up a new value
+        assertEquals(expectedValues.get(4), loaderGetterWithDuration.apply(loader, "key1", Duration.ofSeconds(2)).orElseThrow());
+        testSource.put("key1", valuesToSet.get(4));
+        assertEquals(expectedValues.get(5), loaderGetter.apply(loader, "key1").orElseThrow());
+    }
+
     @Test
     void getString_expandedValueRecursive_returnsError() {
         Map<String, String> mapSource = new HashMap<>();
@@ -238,5 +325,10 @@ class ConfigLoaderIT {
         assertThatThrownBy(builder::build)
                 .isInstanceOf(ConfigurationException.class)
                 .hasMessage("Duplicate source label 'Test source 1' found");
+    }
+
+    @SafeVarargs
+    private static final <R> List<R> listOf(R... items) {
+        return Stream.of(items).collect(Collectors.toList());
     }
 }

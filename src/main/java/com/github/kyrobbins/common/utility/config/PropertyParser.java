@@ -1,6 +1,5 @@
 package com.github.kyrobbins.common.utility.config;
 
-import com.github.kyrobbins.common.exception.ConfigurationException;
 import com.github.kyrobbins.common.exception.ParserException;
 import jakarta.annotation.Nonnull;
 import lombok.RequiredArgsConstructor;
@@ -260,9 +259,9 @@ class PropertyParser {
                         break;
                     default:
                         throw new ParserException(String.format("Invalid type: '%s'", type.getClass().getCanonicalName()));
-                 }
+                }
 
-                 propertyPart.propertyParts.addAll(propertyParts.stream().map(PropertyPart.Builder::build).collect(Collectors.toList()));
+                propertyPart.propertyParts.addAll(propertyParts.stream().map(PropertyPart.Builder::build).collect(Collectors.toList()));
                 return propertyPart;
             }
         }
