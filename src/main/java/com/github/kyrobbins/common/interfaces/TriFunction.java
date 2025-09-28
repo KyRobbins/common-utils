@@ -11,5 +11,13 @@ package com.github.kyrobbins.common.interfaces;
 @FunctionalInterface
 public interface TriFunction<T, U, V, R> {
 
-    R apply(T t, U u, V v);
+    /**
+     * Takes in three values, and returns another value
+     *
+     * @param in1 The first value being taken in by the function
+     * @param in2 The second value being taken in by the function
+     * @param in3 The third value being taken in by the function
+     * @return The result of the operation
+     */
+    R apply(T in1, U in2, V in3);
 }
