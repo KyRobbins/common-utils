@@ -1,6 +1,6 @@
 package com.github.kyrobbins.common.utility.config;
 
-import com.github.kyrobbins.common.interfaces.MaxAgeCache;
+import com.github.kyrobbins.common.utility.cache.MaxAgeCache;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;

@@ -1,4 +1,7 @@
-package com.github.kyrobbins.common.interfaces;
+package com.github.kyrobbins.common.utility.cache;
+
+import com.github.kyrobbins.common.interfaces.ThrowingFunction;
+import com.github.kyrobbins.common.interfaces.ThrowingSupplier;
 
 import java.time.Duration;
 import java.util.Optional;

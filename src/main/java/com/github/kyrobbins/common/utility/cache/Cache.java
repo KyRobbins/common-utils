@@ -1,4 +1,4 @@
-package com.github.kyrobbins.common.interfaces;
+package com.github.kyrobbins.common.utility.cache;
 
 import java.util.Optional;
 import java.util.function.Function;

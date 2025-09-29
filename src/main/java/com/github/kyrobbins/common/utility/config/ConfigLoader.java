@@ -2,8 +2,9 @@ package com.github.kyrobbins.common.utility.config;
 
 import com.github.kyrobbins.common.exception.ConfigurationException;
 import com.github.kyrobbins.common.exception.ParserException;
-import com.github.kyrobbins.common.interfaces.MaxAgeCache;
+import com.github.kyrobbins.common.utility.cache.MaxAgeCache;
 import com.github.kyrobbins.common.utility.cache.AgeAwareCache;
+import com.github.kyrobbins.common.utility.cache.Cache;
 import jakarta.annotation.Nonnull;
 import jakarta.annotation.Nullable;
 import lombok.AccessLevel;
@@ -616,8 +617,7 @@ public class ConfigLoader {
         }
 
         /**
-         * Enables the use of a {@link com.github.kyrobbins.common.interfaces.Cache} for {@link ConfigLoader} instance
-         * that is built by this builder object.
+         * Enables the use of a {@link Cache} for {@link ConfigLoader} instance that is built by this builder object.
          *
          * @return This {@link Builder} instance
          */
