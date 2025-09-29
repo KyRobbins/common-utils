@@ -2,8 +2,8 @@ package com.github.kyrobbins.common.utility.config;
 
 import com.github.kyrobbins.common.exception.ConfigurationException;
 import com.github.kyrobbins.common.exception.ParserException;
-import com.github.kyrobbins.common.interfaces.AgeAwareCache;
-import com.github.kyrobbins.common.utility.cache.MaxAgeCache;
+import com.github.kyrobbins.common.interfaces.MaxAgeCache;
+import com.github.kyrobbins.common.utility.cache.AgeAwareCache;
 import jakarta.annotation.Nonnull;
 import jakarta.annotation.Nullable;
 import lombok.AccessLevel;
@@ -53,7 +53,7 @@ public class ConfigLoader {
     /** The list of {@link Source}s to check through for key values */
     private final List<Source> sources;
     /** The cache used for faster lookups when desired */
-    private final AgeAwareCache<String, String> lookupMaxAgeCache;
+    private final MaxAgeCache<String, String> lookupMaxAgeCache;
     /** Denotes if a Cache is used for the data lookups */
     private final boolean cacheEnabled;
 
@@ -74,7 +74,7 @@ public class ConfigLoader {
     public ConfigLoader(@Nonnull List<Source> sources, boolean enableCache, @Nonnull Clock clock) {
         this.sources = sources;
         this.cacheEnabled = enableCache;
-        this.lookupMaxAgeCache = enableCache ? new MaxAgeCache<>(clock) : new EmptyAgeAwareCache<>();
+        this.lookupMaxAgeCache = enableCache ? new AgeAwareCache<>(clock) : new EmptyMaxAgeCache<>();
     }
 
     /**
@@ -184,7 +184,7 @@ public class ConfigLoader {
         String value;
 
         if (cacheEnabled) {
-            value = lookupMaxAgeCache.get(key, maxAgeMs, this::getString0).orElse(null);
+            value = lookupMaxAgeCache.get(key, maxAgeMs, (Function<String, String>) this::getString0).orElse(null);
         } else {
             value = getString0(key);
         }
